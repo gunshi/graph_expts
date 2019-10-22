@@ -16,20 +16,22 @@ import ipdb
 from torch_geometric.datasets import Planetoid
 import random
 
-# interaction network with two step processing (two steps of potential propagation over neighbours)
+# interaction network with single step processing
 
 dataset = Planetoid(root='/tmp/Cora', name='Cora')
 dataset_GT = Planetoid(root='/tmp/Cora', name='Cora')
 data = dataset_GT[0].to('cuda:0')
 num_classes = 7
-object_model_dim = 256
+object_model_dim = 128
 relation_model_dim = 256
 effect_dim = 256
+
+
 give_only_feats = True  
 give_feats = True  ## always keep true
 corrupt = True
 if(corrupt):
-	p = 0.3             
+	p = 0.3
 	num_incorrect = 0
 	for i in range(dataset[0].y.shape[0]):
 	    if(random.uniform(0, 1)<p):
@@ -55,8 +57,7 @@ y_onehot_GT = torch.zeros((n_objects, num_classes))
 y_onehot_GT.scatter_(1, dataset_GT[0].y.unsqueeze(1), 1)   
 
 target = y_onehot_GT 
-
-# augment/replace x(features) with label
+# augment x
 objects = dataset[0].x  # node features
 if(give_feats):
     if(give_only_feats):
@@ -131,35 +132,19 @@ class RelationalModel(nn.Module):
         return x
 
 class ObjectModel(nn.Module):
-    def __init__(self, input_size, effect_dim, hidden_size):
+    def __init__(self, input_size, hidden_size):
         super(ObjectModel, self).__init__()
-
-        self.encoding_layers = nn.Sequential(
+        
+        self.layers = nn.Sequential(
             nn.Linear(input_size, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),                                      
-            nn.ReLU(),        
+            nn.ReLU(),    
+            nn.Linear(hidden_size, hidden_size),                                      
+            nn.ReLU(),  
+            nn.Linear(hidden_size, num_classes),       
         )
 
-        self.intermed_layers = nn.Sequential(
-            nn.Linear(hidden_size + effect_dim, hidden_size),                                      
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),                                      
-            nn.ReLU(),
-            )
-
-        self.intermed_layers2 = nn.Sequential(
-            nn.Linear(hidden_size + effect_dim, hidden_size),                                      
-            nn.ReLU(),
-            nn.Linear(hidden_size, hidden_size),                                      
-            nn.ReLU(),
-            )
-
-        self.final_layers = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),                                      
-            nn.ReLU(),
-            nn.Linear(hidden_size, num_classes),   
-        )
 
     def forward(self, x):
         '''
@@ -168,41 +153,28 @@ class ObjectModel(nn.Module):
         Returns:
             [batch_size * n_objects, num_classes]                                            
         '''
-        return
-        # input_size = x.size(2)
-        # x = x.view(-1, input_size)
-        # return self.layers(x)
+        input_size = x.size(2)
+        ipdb.set_trace()
+        x = x.view(-1, input_size)
+        return self.layers(x)
 
 
 class InteractionNetwork(nn.Module):
     def __init__(self, n_objects, object_dim, n_relations, relation_dim, effect_dim):
         super(InteractionNetwork, self).__init__()
                                                                                                     
-        self.relational_model = RelationalModel(2*object_model_dim + relation_dim, effect_dim, relation_model_dim)
-        self.relational_model2 = RelationalModel(2*object_model_dim + relation_dim, effect_dim, relation_model_dim)
-
-        self.object_model     = ObjectModel(object_dim, effect_dim, object_model_dim)
+        self.relational_model = RelationalModel(2*object_dim + relation_dim, effect_dim, relation_model_dim)
+        self.object_model     = ObjectModel(object_dim + effect_dim, object_model_dim)
     
     def forward(self, objects, sender_relations, receiver_relations, relation_info):
+        senders   = sender_relations.permute(0, 2, 1).bmm(objects.unsqueeze(0))
+        receivers = receiver_relations.permute(0, 2, 1).bmm(objects.unsqueeze(0))
 
-        obj_enc = self.object_model.encoding_layers(objects) 
-        senders   = sender_relations.permute(0, 2, 1).bmm(obj_enc.unsqueeze(0))
-        receivers = receiver_relations.permute(0, 2, 1).bmm(obj_enc.unsqueeze(0))
-
+        # batch, nrelations, object dim_send, object dim_recv - > scatter gather
         effects = self.relational_model(torch.cat([senders, receivers, relation_info], 2))  
         effect_receivers = receiver_relations.bmm(effects)
-        object_states = self.object_model.intermed_layers(torch.cat([obj_enc.unsqueeze(0), effect_receivers], 2).squeeze())
-
-
-        senders   = sender_relations.permute(0, 2, 1).bmm(object_states.unsqueeze(0))
-        receivers = receiver_relations.permute(0, 2, 1).bmm(object_states.unsqueeze(0))
-
-        effects = self.relational_model2(torch.cat([senders, receivers, relation_info], 2))  
-        effect_receivers = receiver_relations.bmm(effects)
-        object_states = self.object_model.intermed_layers2(torch.cat([object_states.unsqueeze(0), effect_receivers], 2).squeeze())
-
-
-        predicted = self.object_model.final_layers(object_states.squeeze())        
+    
+        predicted = self.object_model(torch.cat([objects.unsqueeze(0), effect_receivers], 2))
         # (n objects , numclasses) 
         predicted = F.log_softmax(predicted, dim=1)
         return predicted
@@ -219,6 +191,7 @@ criterion = nn.MSELoss()
 n_epoch = 1500                                                 
 
 losses = []
+
 
 for epoch in range(n_epoch):
 
@@ -241,8 +214,6 @@ for epoch in range(n_epoch):
         print('Train Accuracy: {:.4f}  correct : {}'.format(train_acc, train_correct))
         print('Test Accuracy: {:.4f}  correct : {}'.format(acc, correct))
 
-
-# swapped train and test
 # for epoch in range(n_epoch):
 
 #     predicted = interaction_network(objects, sender_relations, receiver_relations, relation_info)
